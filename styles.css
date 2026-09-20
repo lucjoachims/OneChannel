@@ -1,0 +1,144 @@
+/* ===================================================================
+   Mémo — style volontairement neutre et discret.
+   L'apparence ne doit pas évoquer une messagerie : un outil sobre.
+   =================================================================== */
+:root {
+  --bg:      #f5f6f4;
+  --surface: #ffffff;
+  --ink:     #23262b;
+  --muted:   #6b7178;
+  --line:    #e4e6e3;
+  --accent:  #44666a;   /* ardoise sourde */
+  --mine:    #e7efe9;   /* mes bulles */
+  --danger:  #9a4b4b;
+  --radius:  11px;
+  --shadow:  0 1px 2px rgba(20,24,28,.06), 0 1px 8px rgba(20,24,28,.04);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, .status { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.app {
+  max-width: 560px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- écrans ------------------------------------------------------- */
+.screen { padding: 28px 20px; }
+.screen[hidden] { display: none; }
+
+.head { margin-bottom: 22px; }
+.head h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -.01em; }
+.head h2 { font-size: 20px; margin: 10px 0 0; }
+.sub { color: var(--muted); margin: 0; }
+
+.stack { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+.foot { color: var(--muted); font-size: 13px; margin-top: 26px; }
+
+/* ---- boutons ------------------------------------------------------ */
+.btn {
+  appearance: none; border: 1px solid var(--line); background: var(--surface);
+  color: var(--ink); padding: 13px 16px; border-radius: var(--radius);
+  font-size: 16px; cursor: pointer; transition: border-color .15s, background .15s;
+}
+.btn:hover { border-color: #cfd3cf; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: #3a585c; }
+.btn.primary:disabled { opacity: .5; cursor: default; }
+
+.link {
+  background: none; border: none; color: var(--accent);
+  font-size: 14px; cursor: pointer; padding: 6px 2px;
+}
+.link.danger { color: var(--danger); }
+
+/* ---- champs ------------------------------------------------------- */
+.field { display: block; margin: 16px 0 6px; }
+.field span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.field input {
+  width: 100%; padding: 12px 13px; font-size: 16px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--ink);
+}
+.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field input.mono { letter-spacing: .12em; }
+
+.hint { font-size: 13px; margin: 4px 2px 14px; min-height: 1em; }
+.hint.ok { color: var(--accent); }
+.hint.warn { color: var(--danger); }
+
+/* ---- résultat de création ---------------------------------------- */
+.result {
+  margin-top: 22px; padding: 18px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.result-title { margin: 0 0 14px; font-size: 14px; color: var(--muted); }
+.kv {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.kv span { color: var(--muted); font-size: 13px; }
+.kv code { font-size: 18px; font-weight: 600; letter-spacing: .04em; }
+.result .btn { margin-top: 16px; width: 100%; }
+
+/* ===================================================================
+   FIL
+   =================================================================== */
+.thread { padding: 0; flex: 1; display: flex; flex-direction: column; height: 100dvh; }
+.thread-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+  background: var(--surface); position: sticky; top: 0; z-index: 2;
+}
+.status { font-size: 12px; color: var(--muted); }
+
+.list { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.empty { text-align: center; color: var(--muted); font-size: 14px; margin-top: 40px; }
+
+.msg { display: flex; flex-direction: column; max-width: 80%; }
+.msg.mine { align-self: flex-end; align-items: flex-end; }
+.msg.theirs { align-self: flex-start; align-items: flex-start; }
+
+.bubble {
+  padding: 9px 13px; border-radius: 14px; font-size: 15px;
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.msg.mine .bubble { background: var(--mine); border-color: #d6e1d8; }
+.bubble.error { color: var(--danger); font-style: italic; }
+.bubble.media img { display: block; max-width: 240px; border-radius: 8px; cursor: pointer; }
+.bubble.media a { color: var(--accent); text-decoration: none; }
+.time { font-size: 11px; color: var(--muted); margin: 3px 4px 0; }
+
+/* ---- zone de saisie ---------------------------------------------- */
+.composer {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 10px 12px; border-top: 1px solid var(--line);
+  background: var(--surface); position: sticky; bottom: 0;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+}
+.composer textarea {
+  flex: 1; resize: none; max-height: 120px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 18px; font: inherit;
+  background: var(--bg); color: var(--ink);
+}
+.composer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.icon-btn {
+  width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink); font-size: 20px; cursor: pointer;
+  flex: none; line-height: 1;
+}
+.icon-btn.send { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

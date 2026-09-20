@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Private Lease</title>
+  <meta name="theme-color" content="#f5f6f4">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ====================== ACCUEIL ====================== -->
+  <section id="start" class="screen">
+    <header class="head">
+      <h1>Private Lease</h1>
+      <p class="sub">Un fil privé éphémère, entre deux personnes. Rien d'autre.</p>
+    </header>
+    <div class="stack">
+      <button id="go-create" class="btn primary">Créer un canal</button>
+      <button id="go-open" class="btn">Ouvrir un canal</button>
+    </div>
+    <p class="foot">Aucune notification ne sort de l'application.<br>Aucune vision possible pour une troisième personnne.<br>Bouton "panique" avec effacement immédiat dans les deux terminaux.<br>Pas de récupération, sauvegarde impossible.</p>
+  </section>
+
+  <!-- ====================== CRÉER ====================== -->
+  <section id="create" class="screen" hidden>
+    <header class="head">
+      <button class="link" data-back>← Retour</button>
+      <h2>Créer un canal</h2>
+    </header>
+
+    <label class="field">
+      <span>Nom du canal (à retenir, choisie par toi)</span>
+      <input id="create-key" type="text" autocomplete="off" placeholder="">
+    </label>
+    <p id="create-strength" class="hint"></p>
+    <button id="create-generate" class="btn primary">Générer le code</button>
+
+    <div id="create-result" class="result" hidden>
+      <p class="result-title">Note ces deux éléments et transmets-les à l'autre personne
+        par un canal sûr (de vive voix, SMS, papier). Les deux seront nécessaires.</p>
+      <div class="kv"><span>Clé</span><code id="out-key"></code></div>
+      <div class="kv"><span>Code</span><code id="out-code"></code></div>
+      <button id="create-confirm" class="btn primary">C'est noté, ouvrir le fil</button>
+    </div>
+  </section>
+
+  <!-- ====================== OUVRIR ====================== -->
+  <section id="open" class="screen" hidden>
+    <header class="head">
+      <button class="link" data-back>← Retour</button>
+      <h2>Ouvrir un canal</h2>
+    </header>
+
+    <label class="field">
+      <span>Clé</span>
+      <input id="open-key" type="text" autocomplete="off" placeholder="la clé reçue">
+    </label>
+    <label class="field">
+      <span>Code</span>
+      <input id="open-code" type="text" autocomplete="off" placeholder="ex. HR42K" class="mono">
+    </label>
+    <p id="open-error" class="hint warn"></p>
+    <button id="open-confirm" class="btn primary">Ouvrir le fil</button>
+  </section>
+
+  <!-- ====================== FIL ====================== -->
+  <section id="thread" class="screen thread" hidden>
+    <header class="thread-head">
+      <button id="thread-leave" class="link">← Quitter</button>
+      <span id="thread-status" class="status"></span>
+      <button id="thread-close" class="link danger">PANIQUE</button>
+    </header>
+
+    <div id="thread-list" class="list"></div>
+    <p id="thread-empty" class="empty">Aucun message. Écris le premier.</p>
+
+    <div class="composer">
+      <button id="msg-attach" class="icon-btn" title="Joindre un fichier">＋</button>
+      <input id="file-input" type="file" hidden accept="image/*,application/pdf,.doc,.docx,.txt">
+      <textarea id="msg-input" rows="1" placeholder="Message"></textarea>
+      <button id="msg-send" class="icon-btn send" title="Envoyer">→</button>
+    </div>
+  </section>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
