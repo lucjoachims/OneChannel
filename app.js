@@ -1,13 +1,17 @@
 // =====================================================================
-//  Canal privé 1:1 — logique client
+//  OneChannel — logique client
 //  Tout le contenu est chiffré ici, avant d'atteindre le serveur.
 //  Le serveur ne reçoit que channel_id (un hash) et de l'illisible.
 //  AUCUNE notification système n'est jamais demandée ni émise.
+//  Pas d'installation (aucun service worker, aucun manifest).
 // =====================================================================
 
 const API = 'api/index.php';
+const POLL_MS = 1500;            // cadence de rafraîchissement (fil visible)
+const TYPING_PING_MS = 2000;     // « j'écris » envoyé au plus toutes les 2 s
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ---- petits utilitaires ------------------------------------------------
 const $ = (sel) => document.querySelector(sel);
@@ -15,9 +19,17 @@ const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2
 const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
+let toastTimer = null;
+function toast(msg, danger = false) {
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'toast' + (danger ? ' danger' : ''); t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+}
+
 // Normalisation de la clé : insensible casse/accents/espaces multiples.
 function normKey(s) {
-  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '')
           .trim().toLowerCase().replace(/\s+/g, ' ');
 }
 const normCode = (s) => s.trim().toUpperCase();
@@ -68,16 +80,20 @@ async function decBytes(ck, ivB64, ctBytes) {
 
 // ---- appels API --------------------------------------------------------
 async function apiPost(action, body) {
-  const r = await fetch(`${API}?action=${action}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return { status: r.status, data: await r.json().catch(() => ({})) };
+  try {
+    const r = await fetch(`${API}?action=${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: r.status, data: await r.json().catch(() => ({})) };
+  } catch (e) { return { status: 0, data: {} }; }
 }
 async function apiGet(action, params) {
-  const q = new URLSearchParams(params).toString();
-  const r = await fetch(`${API}?action=${action}&${q}`);
-  return { status: r.status, data: await r.json().catch(() => ({})) };
+  try {
+    const q = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}?action=${action}&${q}`, { cache: 'no-store' });
+    return { status: r.status, data: await r.json().catch(() => ({})) };
+  } catch (e) { return { status: 0, data: {} }; }
 }
 
 // ---- jeton d'appareil (scellement) ------------------------------------
@@ -90,11 +106,16 @@ function getDeviceToken(channelId) {
 }
 
 // ---- état courant ------------------------------------------------------
-let S = null;       // session active
+let S = null;          // session active
 let pollTimer = null;
+let pulling = false;
+const blobUrls = new Set();
 
 function resetSession() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  for (const u of blobUrls) URL.revokeObjectURL(u);
+  blobUrls.clear();
+  closeLightbox();
   S = null;
 }
 
@@ -106,14 +127,17 @@ function show(screenId) {
   $('#' + screenId).hidden = false;
 }
 
-function showStart() { resetSession(); show('start'); }
+function showStart() { resetSession(); clearThreadView(); show('start'); }
 
 function showCreate() {
   show('create');
+  $('#create-admin').value = '';
   $('#create-key').value = '';
   $('#create-result').hidden = true;
   $('#create-strength').textContent = '';
+  $('#create-error').textContent = '';
   $('#create-generate').disabled = false;
+  $('#create-admin').focus();
 }
 
 function showOpen() {
@@ -121,6 +145,7 @@ function showOpen() {
   $('#open-key').value = '';
   $('#open-code').value = '';
   $('#open-error').textContent = '';
+  $('#open-key').focus();
 }
 
 // ---- force de la clé (indicatif) --------------------------------------
@@ -134,7 +159,7 @@ function keyStrength(k) {
 }
 
 // =====================================================================
-//  CREATE
+//  CREATE (admin)
 // =====================================================================
 $('#create-key').addEventListener('input', (e) => {
   const s = keyStrength(e.target.value);
@@ -145,11 +170,16 @@ $('#create-key').addEventListener('input', (e) => {
 $('#create-generate').addEventListener('click', async () => {
   const key = $('#create-key').value;
   const s = keyStrength(key);
+  if (!$('#create-admin').value) {
+    $('#create-strength').textContent = 'Le mot de passe administrateur est requis.';
+    $('#create-strength').className = 'hint warn'; $('#create-admin').focus(); return;
+  }
   if (!s.ok) { $('#create-strength').textContent = s.label; $('#create-strength').className = 'hint warn'; return; }
   const code = genCode(5);
   $('#out-key').textContent = key.trim();
   $('#out-code').textContent = code;
   $('#create-result').hidden = false;
+  $('#create-error').textContent = '';
   $('#create-generate').disabled = true;
   $('#create-result').dataset.key = key;
   $('#create-result').dataset.code = code;
@@ -158,20 +188,22 @@ $('#create-generate').addEventListener('click', async () => {
 $('#create-confirm').addEventListener('click', async () => {
   const key = $('#create-result').dataset.key;
   const code = $('#create-result').dataset.code;
+  const admin = $('#create-admin').value;
   const channelId = await deriveChannelId(key, code);
   const ck = await deriveCryptoKey(key, code);
   const token = getDeviceToken(channelId);
+  const err = $('#create-error');
+  err.textContent = '';
 
-  let res = await apiPost('create', { channel_id: channelId, device_token: token });
+  let res = await apiPost('create', { channel_id: channelId, device_token: token, admin_password: admin });
+  if (res.status === 403) { err.textContent = 'Mot de passe administrateur incorrect.'; return; }
+  if (res.status === 429) { err.textContent = 'Trop de tentatives. Réessaie plus tard.'; return; }
   if (res.status === 409) {
     // Canal déjà là (re-création depuis le même appareil) : on rejoint.
     res = await apiPost('join', { channel_id: channelId, device_token: token });
   }
-  if (res.status !== 200 || !res.data.ok) {
-    alert("Impossible de créer le canal. Réessaie."); return;
-  }
-  enterThread({ channelId, ck, token, role: res.data.role,
-                closedSeq: res.data.closed_seq || 0 });
+  if (res.status !== 200 || !res.data.ok) { err.textContent = 'Impossible de créer le canal. Réessaie.'; return; }
+  enterThread({ channelId, ck, token, role: res.data.role, closedSeq: res.data.closed_seq || 0 });
 });
 
 // =====================================================================
@@ -180,88 +212,199 @@ $('#create-confirm').addEventListener('click', async () => {
 $('#open-confirm').addEventListener('click', async () => {
   const key = $('#open-key').value;
   const code = $('#open-code').value;
-  $('#open-error').textContent = '';
-  if (!normKey(key) || !normCode(code)) {
-    $('#open-error').textContent = 'Entre la clé et le code.'; return;
-  }
+  const err = $('#open-error');
+  err.textContent = '';
+  if (!normKey(key) || !normCode(code)) { err.textContent = 'Entre la clé et le code.'; return; }
   const channelId = await deriveChannelId(key, code);
   const ck = await deriveCryptoKey(key, code);
   const token = getDeviceToken(channelId);
 
   const res = await apiPost('join', { channel_id: channelId, device_token: token });
-  if (res.status === 404) { $('#open-error').textContent = 'Clé ou code incorrect.'; return; }
-  if (res.status === 403) { $('#open-error').textContent = 'Ce canal est déjà complet (2 appareils).'; return; }
-  if (res.status !== 200 || !res.data.ok) { $('#open-error').textContent = 'Échec de connexion.'; return; }
+  if (res.status === 404) { err.textContent = 'Clé ou code incorrect.'; return; }
+  if (res.status === 403) { err.textContent = 'Ce canal est déjà complet (2 appareils).'; return; }
+  if (res.status === 429) { err.textContent = 'Trop de tentatives. Réessaie plus tard.'; return; }
+  if (res.status !== 200 || !res.data.ok) { err.textContent = 'Échec de connexion.'; return; }
 
-  enterThread({ channelId, ck, token, role: res.data.role,
-                closedSeq: res.data.closed_seq || 0 });
+  enterThread({ channelId, ck, token, role: res.data.role, closedSeq: res.data.closed_seq || 0 });
 });
+$('#open-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#open-confirm').click(); });
 
 // =====================================================================
 //  THREAD (le fil)
 // =====================================================================
-function enterThread(sess) {
-  S = { ...sess, afterId: 0 };
-  show('thread');
-  $('#thread-list').innerHTML = '';
+function clearThreadView() {
+  document.querySelectorAll('#thread-list .msg:not(.typing)').forEach(el => el.remove());
   $('#thread-empty').hidden = false;
-  $('#thread-status').textContent = S.role === 'A'
-    ? (sess.sealedHint ? '' : 'En attente du second participant…')
-    : '';
+  $('#typing').hidden = true;
+  setPresence('', '…');
+}
+
+function setPresence(state, label) {
+  $('#presence-dot').className = 'dot ' + state;
+  $('#thread-status').textContent = label;
+}
+
+function enterThread(sess) {
+  S = { ...sess, afterId: 0, lastReadSent: 0, lastTypingPing: 0, typingSent: false, typingPromise: null, peerMaxId: 0 };
+  show('thread');
+  clearThreadView();
   $('#msg-input').value = '';
   $('#msg-input').focus();
   pull(); // premier tirage immédiat
   pollTimer = setInterval(() => {
     if (document.visibilityState === 'visible') pull();
-  }, 2500);
+  }, POLL_MS);
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S) pull();
+});
 
 async function pull() {
-  if (!S) return;
-  const res = await apiGet('messages', {
-    channel_id: S.channelId, device_token: S.token, after: S.afterId,
-  });
-  if (res.status !== 200 || !res.data.ok) return;
+  if (!S || pulling) return;
+  pulling = true;
+  try {
+    const res = await apiGet('messages', { channel_id: S.channelId, device_token: S.token, after: S.afterId });
+    if (!S || res.status !== 200 || !res.data.ok) {
+      if (S && res.status === 403) { toast('Accès au canal refusé.', true); showStart(); }
+      return;
+    }
+    const d = res.data;
 
-  // Détection d'un "Fermer" distant : on vide la vue.
-  if (res.data.closed_seq > S.closedSeq) {
-    S.closedSeq = res.data.closed_seq;
-    S.afterId = 0;
-    $('#thread-list').innerHTML = '';
-    $('#thread-empty').hidden = false;
-    $('#thread-status').textContent = 'Le fil a été vidé.';
-    return;
-  }
+    // Détection d'une PANIQUE distante : on vide la vue.
+    if (d.closed_seq > S.closedSeq) {
+      S.closedSeq = d.closed_seq;
+      S.afterId = 0; S.peerMaxId = 0; S.lastReadSent = 0;
+      clearThreadView();
+      toast('Le fil a été effacé.', true);
+      return;
+    }
 
-  $('#thread-status').textContent = res.data.sealed ? '' : 'En attente du second participant…';
+    // Nouveaux messages.
+    for (const m of d.messages) {
+      S.afterId = Math.max(S.afterId, m.id);
+      await renderMessage(m);
+    }
 
-  for (const m of res.data.messages) {
-    S.afterId = Math.max(S.afterId, m.id);
-    await renderMessage(m);
-  }
+    // Retire ce qui n'existe plus côté serveur (expiré, brûlé).
+    const alive = new Set(d.alive);
+    document.querySelectorAll('#thread-list .msg[data-id]').forEach(el => {
+      if (!alive.has(+el.dataset.id)) removeMessageEl(el);
+    });
+    if (!document.querySelector('#thread-list .msg[data-id]:not(.gone)')) $('#thread-empty').hidden = false;
+
+    // Présence + frappe.
+    const p = d.peer;
+    if (!d.sealed || !p.present) setPresence('', 'En attente de l’autre…');
+    else if (p.typing) setPresence('typing', 'écrit…');
+    else if (p.online) setPresence('online', 'en ligne');
+    else setPresence('', 'hors ligne');
+    const typingEl = $('#typing');
+    const wasHidden = typingEl.hidden;
+    typingEl.hidden = !(p.present && p.typing);
+    if (wasHidden && !typingEl.hidden) scrollBottom();
+
+    // Accusés sur mes messages.
+    updateTicks(p.delivered_id, p.read_id);
+
+    // Je lis ce que je vois → « lu ».
+    if (document.visibilityState === 'visible' && S.peerMaxId > S.lastReadSent) {
+      S.lastReadSent = S.peerMaxId;
+      apiPost('read', { channel_id: S.channelId, device_token: S.token, up_to: S.peerMaxId });
+    }
+  } finally { pulling = false; }
 }
 
+function updateTicks(deliveredId, readId) {
+  document.querySelectorAll('#thread-list .msg.mine[data-id] .ticks').forEach(t => {
+    const id = +t.closest('.msg').dataset.id;
+    let st = 'sent', label = '✓', title = 'Envoyé';
+    if (id <= readId)           { st = 'read';      label = '✓✓'; title = 'Lu'; }
+    else if (id <= deliveredId) { st = 'delivered'; label = '✓✓'; title = 'Reçu'; }
+    if (!t.classList.contains(st)) { t.className = 'ticks ' + st; t.textContent = label; t.title = title; }
+  });
+}
+
+function removeMessageEl(el) {
+  if (el.classList.contains('gone')) return;
+  el.classList.add('gone');
+  setTimeout(() => el.remove(), REDUCED ? 0 : 380);
+}
+
+function scrollBottom() {
+  const list = $('#thread-list');
+  requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+}
+
+function fmtTime(ts) {
+  const d = ts ? new Date(ts * 1000) : new Date();
+  return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+
+// ---- effet « déchiffrement » -------------------------------------------
+// Le texte reçu apparaît d'abord brouillé, puis chaque caractère se
+// stabilise. Purement cosmétique : le vrai déchiffrement a déjà eu lieu.
+const GLYPHS = '!<>-_\\/[]{}=+*^?#%&@$~0123456789ABCDEFXYZabcdefkmnpqrstuvwxyz§µ¤';
+function morphIn(el, text) {
+  if (REDUCED || !text) { el.textContent = text; return; }
+  const chars = [...text];
+  const total = Math.min(1500, 450 + chars.length * 18);
+  const plan = chars.map((c, i) => ({
+    c, keep: /\s/.test(c),
+    at: (i / chars.length) * total * 0.7 + Math.random() * total * 0.3,
+  }));
+  el.classList.add('morph');
+  const start = performance.now();
+  let lastFrame = 0;
+  function frame(now) {
+    const t = now - start;
+    if (now - lastFrame < 38 && t < total) { requestAnimationFrame(frame); return; }
+    lastFrame = now;
+    const frag = document.createDocumentFragment();
+    let run = '';
+    const flush = () => { if (run) { frag.appendChild(document.createTextNode(run)); run = ''; } };
+    let done = true;
+    for (const p of plan) {
+      if (p.keep || t >= p.at) run += p.c;
+      else {
+        done = false; flush();
+        const g = document.createElement('span'); g.className = 'g';
+        g.textContent = GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
+        frag.appendChild(g);
+      }
+    }
+    flush();
+    el.replaceChildren(frag);
+    if (!done) requestAnimationFrame(frame);
+    else { el.classList.remove('morph'); el.textContent = text; }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---- rendu d'un message --------------------------------------------------
+const ICON_DOC = '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+const ICON_IMG = '<svg viewBox="0 0 24 24" width="18" height="18"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="10" r="1.8" fill="currentColor"/><path d="m4 17 5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+
 async function renderMessage(m) {
+  if (document.querySelector(`#thread-list .msg[data-id="${m.id}"]`)) return;
   $('#thread-empty').hidden = true;
   const mine = (m.sender === S.role);
+  if (!mine) S.peerMaxId = Math.max(S.peerMaxId, m.id);
+
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + (mine ? 'mine' : 'theirs');
+  wrap.dataset.id = m.id;
 
   try {
     if (m.type === 'text') {
       const txt = await decText(S.ck, m.iv, m.ciphertext);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
-      bubble.textContent = txt;
+      if (mine) bubble.textContent = txt; else morphIn(bubble, txt);
       wrap.appendChild(bubble);
     } else if (m.type === 'media') {
       const meta = JSON.parse(await decText(S.ck, m.iv, m.ciphertext));
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble media';
-      bubble.textContent = (meta.kind === 'image' ? 'Image…' : (meta.name || 'Fichier…'));
-      wrap.appendChild(bubble);
-      // Récupère + déchiffre le blob, puis remplace par le rendu réel.
-      loadMedia(meta, bubble);
+      wrap.appendChild(mediaBubble(meta, m.id, mine));
     }
   } catch (e) {
     const bubble = document.createElement('div');
@@ -270,103 +413,172 @@ async function renderMessage(m) {
     wrap.appendChild(bubble);
   }
 
+  const meta = document.createElement('div');
+  meta.className = 'meta';
   const time = document.createElement('span');
-  time.className = 'time';
-  time.textContent = (m.created_at || '').slice(11, 16);
-  wrap.appendChild(time);
+  time.textContent = fmtTime(m.ts);
+  meta.appendChild(time);
+  if (mine) {
+    const ticks = document.createElement('span');
+    ticks.className = 'ticks sent'; ticks.textContent = '✓'; ticks.title = 'Envoyé';
+    meta.appendChild(ticks);
+  }
+  wrap.appendChild(meta);
 
-  const list = $('#thread-list');
-  list.appendChild(wrap);
-  list.scrollTop = list.scrollHeight;
+  $('#thread-list').insertBefore(wrap, $('#typing'));
+  scrollBottom();
 }
 
-async function loadMedia(meta, bubble) {
+// ---- documents : ouverture unique ----------------------------------------
+function mediaBubble(meta, id, mine) {
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble media' + (mine ? '' : ' openable');
+  const isImg = meta.kind === 'image';
+  bubble.innerHTML = `<span class="ic">${isImg ? ICON_IMG : ICON_DOC}</span>`
+    + `<span><span class="nm"></span><span class="st"></span></span>`;
+  bubble.querySelector('.nm').textContent = meta.name || (isImg ? 'Image' : 'Document');
+  bubble.querySelector('.st').textContent = mine
+    ? 'Pas encore ouvert · détruit à l’ouverture'
+    : (isImg ? 'Appuyer pour voir · une seule fois' : 'Appuyer pour télécharger · une seule fois');
+  if (!mine) bubble.addEventListener('click', () => openMedia(meta, id, bubble), { once: true });
+  return bubble;
+}
+
+async function openMedia(meta, id, bubble) {
+  if (!S) return;
+  bubble.classList.remove('openable');
+  bubble.classList.add('busy');
+  bubble.querySelector('.st').textContent = 'Déchiffrement…';
   try {
-    const r = await fetch(`${API}?action=media&channel_id=${S.channelId}&device_token=${S.token}&media_id=${meta.media_id}`);
-    if (!r.ok) { bubble.textContent = '[média indisponible]'; return; }
+    const r = await fetch(`${API}?action=media&channel_id=${S.channelId}&device_token=${S.token}&media_id=${meta.media_id}`, { cache: 'no-store' });
+    if (!r.ok) { bubble.querySelector('.st').textContent = 'Document déjà détruit.'; return; }
     const ctBytes = new Uint8Array(await r.arrayBuffer());
     const plain = await decBytes(S.ck, meta.iv, ctBytes);
     const blob = new Blob([plain], { type: meta.mime || 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
-    bubble.textContent = '';
+    blobUrls.add(url);
+
+    // Détruit sur le serveur dès l'ouverture : le fichier ne sera plus jamais servi.
+    await apiPost('burn', { channel_id: S.channelId, device_token: S.token, message_id: id, media_id: meta.media_id });
+    bubble.querySelector('.st').textContent = 'Ouvert · détruit';
+
     if (meta.kind === 'image') {
-      const img = document.createElement('img');
-      img.src = url; img.alt = meta.name || 'image';
-      img.addEventListener('click', () => window.open(url, '_blank'));
-      bubble.appendChild(img);
+      openLightbox(url);
     } else {
       const a = document.createElement('a');
-      a.href = url; a.download = meta.name || 'fichier';
-      a.textContent = '⬇ ' + (meta.name || 'fichier');
-      bubble.appendChild(a);
+      a.href = url; a.download = meta.name || 'document';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => { URL.revokeObjectURL(url); blobUrls.delete(url); }, 60000);
     }
+    setTimeout(() => { const el = bubble.closest('.msg'); if (el) removeMessageEl(el); }, 1200);
   } catch (e) {
-    bubble.textContent = '[média illisible]';
-  }
+    bubble.querySelector('.st').textContent = 'Document illisible.';
+  } finally { bubble.classList.remove('busy'); }
 }
 
-// ---- envoi texte -------------------------------------------------------
+function openLightbox(url) {
+  const lb = $('#lightbox');
+  $('#lightbox-img').src = url;
+  lb.hidden = false;
+}
+function closeLightbox() {
+  const lb = $('#lightbox');
+  if (lb.hidden) return;
+  const img = $('#lightbox-img');
+  const url = img.src;
+  img.removeAttribute('src');
+  lb.hidden = true;
+  if (url.startsWith('blob:')) { URL.revokeObjectURL(url); blobUrls.delete(url); }
+}
+$('#lightbox-close').addEventListener('click', closeLightbox);
+$('#lightbox').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeLightbox(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+
+// ---- envoi texte ------------------------------------------------------------
 async function sendText() {
-  const txt = $('#msg-input').value.trim();
+  const input = $('#msg-input');
+  const txt = input.value.trim();
   if (!txt || !S) return;
-  $('#msg-input').value = '';
+  input.value = ''; autoGrow();
+  S.typingSent = false;
   const { iv, ciphertext } = await encText(S.ck, txt);
+  await S.typingPromise; // un « j'écris » en vol ne doit pas arriver après l'envoi
   const res = await apiPost('send', {
     channel_id: S.channelId, device_token: S.token, type: 'text', iv, ciphertext,
   });
   if (res.status === 200) pull();
-  else $('#msg-input').value = txt; // on remet le texte en cas d'échec
+  else { input.value = txt; toast('Envoi impossible.', true); }
 }
 $('#msg-send').addEventListener('click', sendText);
 $('#msg-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
 });
 
-// ---- envoi média -------------------------------------------------------
+// « j'écris » — signal léger, jamais plus d'une fois toutes les 2 s.
+function autoGrow() {
+  const ta = $('#msg-input');
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(140, ta.scrollHeight) + 'px';
+}
+$('#msg-input').addEventListener('input', () => {
+  autoGrow();
+  if (!S) return;
+  const has = $('#msg-input').value.length > 0;
+  const now = Date.now();
+  if (has && now - S.lastTypingPing > TYPING_PING_MS) {
+    S.lastTypingPing = now; S.typingSent = true;
+    S.typingPromise = apiPost('typing', { channel_id: S.channelId, device_token: S.token, typing: true });
+  } else if (!has && S.typingSent) {
+    S.typingSent = false; S.lastTypingPing = 0;
+    S.typingPromise = apiPost('typing', { channel_id: S.channelId, device_token: S.token, typing: false });
+  }
+});
+
+// ---- envoi document ----------------------------------------------------------
 $('#msg-attach').addEventListener('click', () => $('#file-input').click());
 $('#file-input').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file || !S) return;
-  if (file.size > 8 * 1024 * 1024) { alert('Fichier trop lourd (8 Mo max).'); return; }
+  if (file.size > 8 * 1024 * 1024) { toast('Fichier trop lourd (8 Mo max).', true); return; }
 
+  toast('Chiffrement et envoi…');
   const buf = new Uint8Array(await file.arrayBuffer());
   const { iv, bytes } = await encBytes(S.ck, buf);
 
   // 1) dépôt du blob chiffré
-  const up = await fetch(`${API}?action=upload`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'X-Channel': S.channelId, 'X-Device': S.token, 'X-Iv': iv,
-    },
-    body: bytes,
-  });
-  const upData = await up.json().catch(() => ({}));
-  if (!up.ok || !upData.ok) { alert("Échec de l'envoi du fichier."); return; }
+  let upData = {};
+  try {
+    const up = await fetch(`${API}?action=upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Channel': S.channelId, 'X-Device': S.token, 'X-Iv': iv },
+      body: bytes,
+    });
+    upData = await up.json().catch(() => ({}));
+    if (!up.ok || !upData.ok) throw new Error('upload');
+  } catch (err) { toast("Échec de l'envoi du document.", true); return; }
 
   // 2) message référençant le média (métadonnées chiffrées elles aussi)
   const kind = file.type.startsWith('image/') ? 'image' : 'doc';
   const meta = { kind, media_id: upData.media_id, iv, name: file.name, mime: file.type };
   const m = await encText(S.ck, JSON.stringify(meta));
-  await apiPost('send', {
-    channel_id: S.channelId, device_token: S.token, type: 'media',
-    iv: m.iv, ciphertext: m.ciphertext,
-  });
+  await apiPost('send', { channel_id: S.channelId, device_token: S.token, type: 'media', iv: m.iv, ciphertext: m.ciphertext });
   pull();
 });
 
-// ---- fermer (vider) ----------------------------------------------------
-$('#thread-close').addEventListener('click', async () => {
+// ---- PANIQUE : immédiat, sans confirmation ----------------------------------
+$('#thread-panic').addEventListener('click', async () => {
   if (!S) return;
-  if (!confirm('Vider le fil pour les deux ? La clé et le code restent valables pour reprendre plus tard.')) return;
+  // Local d'abord (instantané), serveur ensuite (pour l'autre appareil).
+  clearThreadView();
+  closeLightbox();
+  $('#msg-input').value = ''; autoGrow();
+  document.body.classList.remove('panic-flash'); void document.body.offsetWidth;
+  document.body.classList.add('panic-flash');
+  S.afterId = 0; S.peerMaxId = 0; S.lastReadSent = 0;
   const res = await apiPost('close', { channel_id: S.channelId, device_token: S.token });
-  if (res.data && typeof res.data.closed_seq === 'number') S.closedSeq = res.data.closed_seq;
-  $('#thread-list').innerHTML = '';
-  $('#thread-empty').hidden = false;
-  $('#thread-status').textContent = 'Fil vidé.';
-  S.afterId = 0;
-  pull();
+  if (S && res.data && typeof res.data.closed_seq === 'number') S.closedSeq = res.data.closed_seq;
+  toast('Tout a été effacé, des deux côtés.');
 });
 
 $('#thread-leave').addEventListener('click', showStart);
@@ -376,9 +588,10 @@ $('#go-create').addEventListener('click', showCreate);
 $('#go-open').addEventListener('click', showOpen);
 document.querySelectorAll('[data-back]').forEach(b => b.addEventListener('click', showStart));
 
-// Service worker (installabilité + hors-ligne du shell, AUCUN push).
+// Plus d'installation : on désinscrit tout ancien service worker et son cache.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => {});
+  if (window.caches) caches.keys().then(ks => ks.forEach(k => caches.delete(k))).catch(() => {});
 }
 
 showStart();

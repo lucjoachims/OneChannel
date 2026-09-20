@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS participants (
   role         CHAR(1)    NOT NULL,               -- 'A' (créateur) ou 'B'
   ip           VARBINARY(16) NULL,                -- log responsable (inet_pton)
   joined_at    DATETIME   NOT NULL,
+  seen_at      DATETIME   NULL,                   -- dernière interrogation (présence)
+  typing_at    DATETIME   NULL,                   -- dernière frappe (« écrit… »)
+  last_delivered_id BIGINT UNSIGNED NOT NULL DEFAULT 0, -- dernier message récupéré
+  last_read_id      BIGINT UNSIGNED NOT NULL DEFAULT 0, -- dernier message lu (écran visible)
   PRIMARY KEY (channel_id, device_token),
   KEY idx_part_channel (channel_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -39,6 +43,8 @@ CREATE TABLE IF NOT EXISTS participants (
 --  Messages : le contenu (ciphertext + iv) est opaque pour le serveur.
 --  type = 'text' | 'media'. Pour 'media', le ciphertext décrypté côté
 --  client contient { kind, media_id, name, mime }.
+--  Tout message plus vieux que MESSAGE_TTL_SECONDS (1 h) est purgé par
+--  l'API elle-même ; un document est détruit dès qu'il a été ouvert.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS messages (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -49,7 +55,8 @@ CREATE TABLE IF NOT EXISTS messages (
   ciphertext MEDIUMTEXT   NOT NULL,               -- base64 AES-GCM
   created_at DATETIME     NOT NULL,
   PRIMARY KEY (id),
-  KEY idx_msg_channel (channel_id, id)
+  KEY idx_msg_channel (channel_id, id),
+  KEY idx_msg_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------
@@ -64,7 +71,8 @@ CREATE TABLE IF NOT EXISTS media (
   size       INT UNSIGNED    NOT NULL,
   created_at DATETIME        NOT NULL,
   PRIMARY KEY (media_id),
-  KEY idx_media_channel (channel_id)
+  KEY idx_media_channel (channel_id),
+  KEY idx_media_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------

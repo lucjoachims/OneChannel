@@ -3,6 +3,19 @@
 //  API — point d'entrée unique : api/index.php?action=...
 //  Le serveur ne voit jamais la clé ni le code, seulement channel_id.
 //  Le contenu est chiffré côté client. AUCUNE notification n'est émise.
+//
+//  Actions :
+//    create   (POST) — créer un canal (mot de passe admin requis)
+//    join     (POST) — rejoindre / revenir dans un canal
+//    send     (POST) — poster un message chiffré (texte ou média)
+//    messages (GET)  — nouveaux messages + état du pair (présence, frappe,
+//                      reçu/lu) + liste des ids encore vivants
+//    typing   (POST) — « je suis en train d'écrire » (ou plus)
+//    read     (POST) — « j'ai lu jusqu'au message n° X »
+//    burn     (POST) — détruire un message (document ouvert)
+//    upload   (POST) — déposer un blob chiffré
+//    media    (GET)  — récupérer un blob chiffré
+//    close    (POST) — PANIQUE : tout effacer pour les deux
 // =====================================================================
 require_once __DIR__ . '/helpers.php';
 
@@ -10,22 +23,33 @@ if (DEBUG) { ini_set('display_errors', '1'); error_reporting(E_ALL); }
 
 $action = $_GET['action'] ?? '';
 
+/** Lit et valide (channel_id, device_token) depuis un tableau. */
+function ids_from(array $src): array {
+    $cid = $src['channel_id'] ?? null;
+    $tok = $src['device_token'] ?? null;
+    if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
+        json_out(400, ['error' => 'bad_params']);
+    }
+    return [$cid, $tok];
+}
+
 try {
     switch ($action) {
 
         // -------------------------------------------------------------
-        //  CREATE — le créateur (rôle A) ouvre un canal.
+        //  CREATE — réservé à l'administrateur (mot de passe config.php).
         // -------------------------------------------------------------
         case 'create': {
             rate_limit('create', RL_MAX_CREATE);
             $in = body_json();
-            $cid = $in['channel_id'] ?? null;
-            $tok = $in['device_token'] ?? null;
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
+            [$cid, $tok] = ids_from($in);
+            $pw = $in['admin_password'] ?? '';
+            if (!is_string($pw) || ADMIN_PASSWORD === '' || !hash_equals(ADMIN_PASSWORD, $pw)) {
+                // Petite temporisation : rend la devinette encore plus lente.
+                usleep(300000);
+                json_out(403, ['error' => 'bad_admin']);
             }
             $pdo = db();
-            // Canal déjà existant ?
             $st = $pdo->prepare('SELECT sealed FROM channels WHERE channel_id = ?');
             $st->execute([$cid]);
             if ($st->fetch()) {
@@ -42,7 +66,7 @@ try {
                  VALUES (?, ?, "A", ?, ?)'
             )->execute([$cid, $tok, client_ip_bin(), now_sql()]);
             $pdo->commit();
-            json_out(200, ['ok' => true, 'role' => 'A', 'sealed' => false]);
+            json_out(200, ['ok' => true, 'role' => 'A', 'sealed' => false, 'closed_seq' => 0]);
         }
 
         // -------------------------------------------------------------
@@ -51,16 +75,11 @@ try {
         // -------------------------------------------------------------
         case 'join': {
             rate_limit('join', RL_MAX_JOIN);
-            $in = body_json();
-            $cid = $in['channel_id'] ?? null;
-            $tok = $in['device_token'] ?? null;
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
+            [$cid, $tok] = ids_from(body_json());
             $pdo = db();
             $pdo->beginTransaction();
 
-            $st = $pdo->prepare('SELECT sealed, closed_seq FROM channels WHERE channel_id = ? FOR UPDATE');
+            $st = $pdo->prepare('SELECT sealed, closed_seq FROM channels WHERE channel_id = ?' . for_update());
             $st->execute([$cid]);
             $chan = $st->fetch();
             if (!$chan) {
@@ -100,64 +119,49 @@ try {
         }
 
         // -------------------------------------------------------------
-        //  STATUS — état du canal (scellé ? fermé depuis ?).
-        // -------------------------------------------------------------
-        case 'status': {
-            $cid = $_GET['channel_id'] ?? null;
-            $tok = $_GET['device_token'] ?? null;
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
-            require_member($cid, $tok);
-            $st = db()->prepare('SELECT sealed, closed_seq FROM channels WHERE channel_id = ?');
-            $st->execute([$cid]);
-            $c = $st->fetch();
-            json_out(200, ['ok' => true, 'sealed' => (bool)$c['sealed'],
-                           'closed_seq' => (int)$c['closed_seq']]);
-        }
-
-        // -------------------------------------------------------------
         //  SEND — poster un message (texte ou référence média), chiffré.
         // -------------------------------------------------------------
         case 'send': {
             $in = body_json();
-            $cid = $in['channel_id'] ?? null;
-            $tok = $in['device_token'] ?? null;
+            [$cid, $tok] = ids_from($in);
             $type = $in['type'] ?? '';
             $iv = $in['iv'] ?? '';
             $ct = $in['ciphertext'] ?? '';
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
             if (!in_array($type, ['text', 'media'], true) || !valid_b64($iv, 32)
                 || !is_string($ct) || $ct === '' || strlen($ct) > 16000000) {
                 json_out(400, ['error' => 'bad_payload']);
             }
             $role = require_member($cid, $tok);
             $pdo = db();
+            $now = now_sql();
             $pdo->prepare(
                 'INSERT INTO messages (channel_id, sender, type, iv, ciphertext, created_at)
                  VALUES (?, ?, ?, ?, ?, ?)'
-            )->execute([$cid, $role, $type, $iv, $ct, now_sql()]);
+            )->execute([$cid, $role, $type, $iv, $ct, $now]);
             $id = (int)$pdo->lastInsertId();
+            // Envoyer, c'est aussi arrêter d'écrire.
+            $pdo->prepare('UPDATE participants SET typing_at = NULL, seen_at = ? WHERE channel_id = ? AND device_token = ?')
+                ->execute([$now, $cid, $tok]);
             $pdo->prepare('UPDATE channels SET last_activity = ? WHERE channel_id = ?')
-                ->execute([now_sql(), $cid]);
-            json_out(200, ['ok' => true, 'id' => $id]);
+                ->execute([$now, $cid]);
+            json_out(200, ['ok' => true, 'id' => $id, 'created_at' => $now]);
         }
 
         // -------------------------------------------------------------
-        //  MESSAGES — liste les messages après ?after (id).
-        //  Renvoie aussi closed_seq pour détecter un "Fermer" distant.
+        //  MESSAGES — nouveaux messages après ?after (id), état du pair,
+        //  liste des ids vivants (pour retirer ce qui a expiré / brûlé).
+        //  C'est aussi ici qu'on purge (aucun cron nécessaire).
         // -------------------------------------------------------------
         case 'messages': {
-            $cid = $_GET['channel_id'] ?? null;
-            $tok = $_GET['device_token'] ?? null;
+            [$cid, $tok] = ids_from($_GET);
             $after = (int)($_GET['after'] ?? 0);
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
-            require_member($cid, $tok);
+            $role = require_member($cid, $tok);
             $pdo = db();
+
+            purge_expired($cid);
+            // De temps en temps, purge globale (canaux que personne ne rouvre).
+            if (random_int(1, 25) === 1) purge_expired(null);
+
             $st = $pdo->prepare('SELECT sealed, closed_seq FROM channels WHERE channel_id = ?');
             $st->execute([$cid]);
             $c = $st->fetch();
@@ -168,12 +172,103 @@ try {
             );
             $st->execute([$cid, $after]);
             $msgs = $st->fetchAll();
+            foreach ($msgs as &$m) { $m['id'] = (int)$m['id']; $m['ts'] = sql_ts($m['created_at']); }
+            unset($m);
+
+            $st = $pdo->prepare('SELECT id FROM messages WHERE channel_id = ? ORDER BY id ASC');
+            $st->execute([$cid]);
+            $alive = array_map('intval', array_column($st->fetchAll(), 'id'));
+
+            // Je suis là ; et tout ce que je viens de recevoir est « reçu ».
+            $maxId = $alive ? max($alive) : 0;
+            $now = now_sql();
+            $st = $pdo->prepare('SELECT last_delivered_id FROM participants WHERE channel_id = ? AND device_token = ?');
+            $st->execute([$cid, $tok]);
+            $myDelivered = (int)($st->fetch()['last_delivered_id'] ?? 0);
+            $pdo->prepare('UPDATE participants SET seen_at = ?, last_delivered_id = ? WHERE channel_id = ? AND device_token = ?')
+                ->execute([$now, max($myDelivered, $maxId), $cid, $tok]);
+
+            // État de l'autre.
+            $st = $pdo->prepare(
+                'SELECT seen_at, typing_at, last_delivered_id, last_read_id
+                 FROM participants WHERE channel_id = ? AND role <> ?'
+            );
+            $st->execute([$cid, $role]);
+            $p = $st->fetch();
+            $t = time();
+            $peer = $p ? [
+                'present'      => true,
+                'online'       => sql_ts($p['seen_at'])   > $t - ONLINE_TTL_SECONDS,
+                'typing'       => sql_ts($p['typing_at']) > $t - TYPING_TTL_SECONDS,
+                'delivered_id' => (int)$p['last_delivered_id'],
+                'read_id'      => (int)$p['last_read_id'],
+            ] : ['present' => false, 'online' => false, 'typing' => false,
+                 'delivered_id' => 0, 'read_id' => 0];
+
             json_out(200, [
-                'ok' => true,
-                'sealed' => (bool)$c['sealed'],
+                'ok'         => true,
+                'sealed'     => (bool)$c['sealed'],
                 'closed_seq' => (int)$c['closed_seq'],
-                'messages' => $msgs,
+                'now'        => $t,
+                'ttl'        => MESSAGE_TTL_SECONDS,
+                'messages'   => $msgs,
+                'alive'      => $alive,
+                'peer'       => $peer,
             ]);
+        }
+
+        // -------------------------------------------------------------
+        //  TYPING — « j'écris » (typing: true) ou « j'ai arrêté » (false).
+        // -------------------------------------------------------------
+        case 'typing': {
+            $in = body_json();
+            [$cid, $tok] = ids_from($in);
+            require_member($cid, $tok);
+            $typing = !empty($in['typing']);
+            db()->prepare('UPDATE participants SET typing_at = ?, seen_at = ? WHERE channel_id = ? AND device_token = ?')
+                ->execute([$typing ? now_sql() : null, now_sql(), $cid, $tok]);
+            json_out(200, ['ok' => true]);
+        }
+
+        // -------------------------------------------------------------
+        //  READ — « j'ai lu jusqu'au message up_to » (ne recule jamais).
+        // -------------------------------------------------------------
+        case 'read': {
+            $in = body_json();
+            [$cid, $tok] = ids_from($in);
+            $upTo = (int)($in['up_to'] ?? 0);
+            require_member($cid, $tok);
+            $pdo = db();
+            $st = $pdo->prepare('SELECT last_read_id FROM participants WHERE channel_id = ? AND device_token = ?');
+            $st->execute([$cid, $tok]);
+            $cur = (int)($st->fetch()['last_read_id'] ?? 0);
+            $pdo->prepare('UPDATE participants SET last_read_id = ?, seen_at = ? WHERE channel_id = ? AND device_token = ?')
+                ->execute([max($cur, $upTo), now_sql(), $cid, $tok]);
+            json_out(200, ['ok' => true]);
+        }
+
+        // -------------------------------------------------------------
+        //  BURN — détruit un message et, le cas échéant, son média.
+        //  Appelé par le destinataire dès qu'il a ouvert un document.
+        // -------------------------------------------------------------
+        case 'burn': {
+            $in = body_json();
+            [$cid, $tok] = ids_from($in);
+            $mid = (int)($in['message_id'] ?? 0);
+            $media = $in['media_id'] ?? null;
+            if ($mid <= 0) json_out(400, ['error' => 'bad_params']);
+            require_member($cid, $tok);
+            $pdo = db();
+            $pdo->prepare('DELETE FROM messages WHERE id = ? AND channel_id = ?')->execute([$mid, $cid]);
+            if (valid_hex($media, 64)) {
+                $st = $pdo->prepare('SELECT path FROM media WHERE media_id = ? AND channel_id = ?');
+                $st->execute([$media, $cid]);
+                if ($row = $st->fetch()) {
+                    @unlink($row['path']);
+                    $pdo->prepare('DELETE FROM media WHERE media_id = ?')->execute([$media]);
+                }
+            }
+            json_out(200, ['ok' => true]);
         }
 
         // -------------------------------------------------------------
@@ -196,7 +291,7 @@ try {
 
             if (!is_dir(UPLOAD_DIR)) @mkdir(UPLOAD_DIR, 0700, true);
             $media_id = bin2hex(random_bytes(32));
-            $path = UPLOAD_DIR . '/' . $media_id . '.bin';
+            $path = rtrim(UPLOAD_DIR, '/') . '/' . $media_id . '.bin';
             if (file_put_contents($path, $bytes) === false) {
                 json_out(500, ['error' => 'write_failed']);
             }
@@ -211,12 +306,9 @@ try {
         //  MEDIA — renvoie le blob chiffré (le client déchiffre).
         // -------------------------------------------------------------
         case 'media': {
-            $cid = $_GET['channel_id'] ?? null;
-            $tok = $_GET['device_token'] ?? null;
+            [$cid, $tok] = ids_from($_GET);
             $mid = $_GET['media_id'] ?? null;
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64) || !valid_hex($mid, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
+            if (!valid_hex($mid, 64)) json_out(400, ['error' => 'bad_params']);
             require_member($cid, $tok);
             $st = db()->prepare('SELECT path FROM media WHERE media_id = ? AND channel_id = ?');
             $st->execute([$mid, $cid]);
@@ -230,28 +322,20 @@ try {
         }
 
         // -------------------------------------------------------------
-        //  CLOSE — efface messages + médias des deux côtés.
+        //  CLOSE (PANIQUE) — efface messages + médias des deux côtés.
         //  Le canal reste scellé aux 2 appareils : on peut reprendre.
         // -------------------------------------------------------------
         case 'close': {
-            $in = body_json();
-            $cid = $in['channel_id'] ?? null;
-            $tok = $in['device_token'] ?? null;
-            if (!valid_hex($cid, 64) || !valid_hex($tok, 64)) {
-                json_out(400, ['error' => 'bad_params']);
-            }
+            [$cid, $tok] = ids_from(body_json());
             require_member($cid, $tok);
             $pdo = db();
             $pdo->beginTransaction();
-            // Supprimer les fichiers médias sur disque.
-            $st = $pdo->prepare('SELECT path FROM media WHERE channel_id = ?');
-            $st->execute([$cid]);
-            foreach ($st->fetchAll() as $m) { @unlink($m['path']); }
-            $pdo->prepare('DELETE FROM media    WHERE channel_id = ?')->execute([$cid]);
-            $pdo->prepare('DELETE FROM messages WHERE channel_id = ?')->execute([$cid]);
+            wipe_channel($pdo, $cid);
             $pdo->prepare(
                 'UPDATE channels SET closed_seq = closed_seq + 1, last_activity = ? WHERE channel_id = ?'
             )->execute([now_sql(), $cid]);
+            $pdo->prepare('UPDATE participants SET last_delivered_id = 0, last_read_id = 0, typing_at = NULL WHERE channel_id = ?')
+                ->execute([$cid]);
             $pdo->commit();
             $st = $pdo->prepare('SELECT closed_seq FROM channels WHERE channel_id = ?');
             $st->execute([$cid]);

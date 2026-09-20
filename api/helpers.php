@@ -8,6 +8,7 @@ require_once __DIR__ . '/db.php';
 function json_out(int $code, array $data): void {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
     echo json_encode($data, JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -68,7 +69,7 @@ function rate_limit(string $action, int $max): void {
     $pdo = db();
     $pdo->beginTransaction();
     try {
-        $st = $pdo->prepare('SELECT window_start, cnt FROM rl WHERE k = ? FOR UPDATE');
+        $st = $pdo->prepare('SELECT window_start, cnt FROM rl WHERE k = ?' . for_update());
         $st->execute([$k]);
         $row = $st->fetch();
         if (!$row || $row['window_start'] < $winStart) {
@@ -92,3 +93,45 @@ function rate_limit(string $action, int $max): void {
 }
 
 function now_sql(): string { return gmdate('Y-m-d H:i:s'); }
+
+/** Date SQL (UTC) d'il y a $seconds secondes. */
+function ago_sql(int $seconds): string { return gmdate('Y-m-d H:i:s', time() - $seconds); }
+
+/** Convertit une date SQL (UTC) en timestamp Unix. */
+function sql_ts(?string $s): int {
+    if (!$s) return 0;
+    $t = strtotime($s . ' UTC');
+    return $t === false ? 0 : $t;
+}
+
+/**
+ * Efface tout le contenu d'un canal (messages + médias sur disque).
+ * Utilisé par « panique » et par la purge.
+ */
+function wipe_channel(PDO $pdo, string $cid): void {
+    $st = $pdo->prepare('SELECT path FROM media WHERE channel_id = ?');
+    $st->execute([$cid]);
+    foreach ($st->fetchAll() as $m) { @unlink($m['path']); }
+    $pdo->prepare('DELETE FROM media    WHERE channel_id = ?')->execute([$cid]);
+    $pdo->prepare('DELETE FROM messages WHERE channel_id = ?')->execute([$cid]);
+}
+
+/**
+ * Purge des messages et médias plus vieux que MESSAGE_TTL_SECONDS.
+ * $cid = null → tous les canaux (appelé de temps en temps, ou par cron).
+ * Aucun cron n'est requis : la purge est déclenchée à chaque lecture.
+ */
+function purge_expired(?string $cid = null): void {
+    $pdo = db();
+    $limit = ago_sql(MESSAGE_TTL_SECONDS);
+    $where = 'created_at < ?' . ($cid !== null ? ' AND channel_id = ?' : '');
+    $args  = $cid !== null ? [$limit, $cid] : [$limit];
+
+    $st = $pdo->prepare("SELECT media_id, path FROM media WHERE $where");
+    $st->execute($args);
+    foreach ($st->fetchAll() as $m) {
+        @unlink($m['path']);
+        $pdo->prepare('DELETE FROM media WHERE media_id = ?')->execute([$m['media_id']]);
+    }
+    $pdo->prepare("DELETE FROM messages WHERE $where")->execute($args);
+}

@@ -3,27 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Private Lease</title>
-  <meta name="theme-color" content="#f5f6f4">
-  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#0b0d12">
+  <title>OneChannel</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="app">
 
   <!-- ====================== ACCUEIL ====================== -->
-  <section id="start" class="screen">
-    <header class="head">
-      <h1>Private Lease</h1>
-      <p class="sub">Un fil privé éphémère, entre deux personnes. Rien d'autre.</p>
-    </header>
-    <div class="stack">
-      <button id="go-create" class="btn primary">Créer un canal</button>
-      <button id="go-open" class="btn">Ouvrir un canal</button>
+  <section id="start" class="screen center">
+    <div class="hero">
+      <div class="mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="56" height="56"><path d="M24 4 8 11v12c0 10.5 6.8 18.3 16 21 9.2-2.7 16-10.5 16-21V11L24 4Z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><circle cx="24" cy="23" r="4" fill="currentColor"/><path d="M24 27v7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </div>
+      <h1>OneChannel</h1>
+      <p class="sub">Un fil privé, éphémère, entre deux personnes.<br>Rien d'autre, personne d'autre.</p>
     </div>
-    <p class="foot">Aucune notification ne sort de l'application.<br>Aucune vision possible pour une troisième personnne.<br>Bouton "panique" avec effacement immédiat dans les deux terminaux.<br>Pas de récupération, sauvegarde impossible.</p>
+    <div class="stack">
+      <button id="go-open" class="btn primary">Ouvrir un canal</button>
+      <button id="go-create" class="btn ghost">Créer un canal <span class="tag">admin</span></button>
+    </div>
+    <ul class="features">
+      <li><b>Chiffré</b> sur ton appareil, illisible pour le serveur.</li>
+      <li><b>Scellé</b> à deux appareils, un troisième est refusé.</li>
+      <li><b>Éphémère</b> : chaque message s'efface après une heure.</li>
+      <li><b>Documents</b> détruits dès leur première ouverture.</li>
+      <li><b>Panique</b> : tout disparaît des deux côtés, sans question.</li>
+      <li><b>Aucune notification</b>, jamais. On ouvre pour lire.</li>
+    </ul>
   </section>
 
   <!-- ====================== CRÉER ====================== -->
@@ -31,20 +40,26 @@
     <header class="head">
       <button class="link" data-back>← Retour</button>
       <h2>Créer un canal</h2>
+      <p class="sub">Réservé à l'administrateur. La personne invitée n'a besoin que de la clé et du code.</p>
     </header>
 
     <label class="field">
-      <span>Nom du canal (à retenir, choisie par toi)</span>
-      <input id="create-key" type="text" autocomplete="off" placeholder="">
+      <span>Mot de passe administrateur</span>
+      <input id="create-admin" type="password" autocomplete="current-password" placeholder="défini dans api/config.php">
+    </label>
+    <label class="field">
+      <span>Clé du canal (choisie par toi, à retenir)</span>
+      <input id="create-key" type="text" autocomplete="off" placeholder="ex. Fête14Ans">
     </label>
     <p id="create-strength" class="hint"></p>
     <button id="create-generate" class="btn primary">Générer le code</button>
 
-    <div id="create-result" class="result" hidden>
-      <p class="result-title">Note ces deux éléments et transmets-les à l'autre personne
-        par un canal sûr (de vive voix, SMS, papier). Les deux seront nécessaires.</p>
+    <div id="create-result" class="card" hidden>
+      <p class="card-title">Note ces deux éléments et transmets-les à l'autre personne
+        hors de l'application (de vive voix, papier…). Les deux sont nécessaires.</p>
       <div class="kv"><span>Clé</span><code id="out-key"></code></div>
       <div class="kv"><span>Code</span><code id="out-code"></code></div>
+      <p id="create-error" class="hint warn"></p>
       <button id="create-confirm" class="btn primary">C'est noté, ouvrir le fil</button>
     </div>
   </section>
@@ -54,6 +69,7 @@
     <header class="head">
       <button class="link" data-back>← Retour</button>
       <h2>Ouvrir un canal</h2>
+      <p class="sub">Entre la clé et le code qu'on t'a transmis.</p>
     </header>
 
     <label class="field">
@@ -62,7 +78,7 @@
     </label>
     <label class="field">
       <span>Code</span>
-      <input id="open-code" type="text" autocomplete="off" placeholder="ex. HR42K" class="mono">
+      <input id="open-code" type="text" autocomplete="off" autocapitalize="characters" placeholder="ex. HR42K" class="mono">
     </label>
     <p id="open-error" class="hint warn"></p>
     <button id="open-confirm" class="btn primary">Ouvrir le fil</button>
@@ -72,22 +88,43 @@
   <section id="thread" class="screen thread" hidden>
     <header class="thread-head">
       <button id="thread-leave" class="link">← Quitter</button>
-      <span id="thread-status" class="status"></span>
-      <button id="thread-close" class="link danger">PANIQUE</button>
+      <div class="presence">
+        <span id="presence-dot" class="dot"></span>
+        <span id="thread-status" class="status">…</span>
+      </div>
+      <button id="thread-panic" class="panic" title="Efface tout, immédiatement, des deux côtés">PANIQUE</button>
     </header>
 
-    <div id="thread-list" class="list"></div>
-    <p id="thread-empty" class="empty">Aucun message. Écris le premier.</p>
+    <div id="thread-list" class="list">
+      <p id="thread-empty" class="empty">Aucun message.<br><small>Tout ce qui est écrit ici disparaît après une heure.</small></p>
+      <div id="typing" class="msg theirs typing" hidden>
+        <div class="bubble dots"><i></i><i></i><i></i></div>
+      </div>
+    </div>
 
     <div class="composer">
-      <button id="msg-attach" class="icon-btn" title="Joindre un fichier">＋</button>
-      <input id="file-input" type="file" hidden accept="image/*,application/pdf,.doc,.docx,.txt">
-      <textarea id="msg-input" rows="1" placeholder="Message"></textarea>
-      <button id="msg-send" class="icon-btn send" title="Envoyer">→</button>
+      <button id="msg-attach" class="icon-btn" title="Joindre un document (détruit dès son ouverture)" aria-label="Joindre">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M21 11.5 12.5 20a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.5 3.5 0 0 1 5 5l-9.2 9.2a1.5 1.5 0 0 1-2.1-2.1L16 6.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <input id="file-input" type="file" hidden>
+      <textarea id="msg-input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
+      <button id="msg-send" class="icon-btn send" title="Envoyer" aria-label="Envoyer">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
   </section>
 
 </div>
+
+<!-- Visionneuse d'image : la fermer, c'est aussi la perdre (document déjà détruit). -->
+<div id="lightbox" class="lightbox" hidden>
+  <button id="lightbox-close" class="lightbox-close" aria-label="Fermer">✕</button>
+  <p class="lightbox-note">Ce document a été détruit sur le serveur. Il disparaîtra à la fermeture.</p>
+  <img id="lightbox-img" alt="">
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
 <script src="app.js"></script>
 </body>
 </html>
