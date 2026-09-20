@@ -33,6 +33,7 @@ C'est *l'absence* de notification qui est la fonctionnalité. On ouvre l'app pou
 ├── app.js                  ← logique + chiffrement client
 ├── styles.css              ← thème sombre
 ├── icon.svg                ← favicon
+├── sw.js                   ← « kill switch » : désinstalle l'ancien service worker
 ├── api/
 │   ├── config.example.php  ← À COPIER en config.php puis remplir
 │   ├── config.php          ← (ignoré par git : DB, mot de passe admin, TTL…)
@@ -54,7 +55,7 @@ C'est *l'absence* de notification qui est la fonctionnalité. On ouvre l'app pou
    ```bash
    mysql -u TON_USER -p TA_BASE < schema.sql
    ```
-   Base déjà en place (version précédente) ? Joue plutôt `migrate-v2.sql`.
+   Base déjà en place (version précédente) ? Joue `migrate-v2.sql`, ou ne fais rien : l'API ajoute elle-même les colonnes manquantes au premier `create`/`join`.
 
 2. **Configuration.** Copie `api/config.example.php` en `api/config.php`, renseigne les identifiants DB et surtout **`ADMIN_PASSWORD`** (une phrase longue, connue de toi seul). `config.php` est dans `.gitignore` : ne le commite jamais.
 
@@ -68,6 +69,8 @@ C'est *l'absence* de notification qui est la fonctionnalité. On ouvre l'app pou
    ```
 
 5. **HTTPS obligatoire.** WebCrypto ne fonctionne **que** sur `https://` (ou `http://localhost` en test). Sans HTTPS, l'app ne chiffrera pas.
+
+**Vérification** : ouvre `https://ton-site/api/index.php?action=health`. Il doit répondre `"ok":true` avec `db`, `schema` et `uploads_writable` à `true`. Sinon, le champ `db_error` dit ce qui bloque.
 
 Ouvre l'URL → « Créer un canal » (mot de passe admin) → note la clé + le code → l'autre fait « Ouvrir un canal » avec les deux. C'est tout.
 
@@ -86,6 +89,7 @@ Ouvre l'URL → « Créer un canal » (mot de passe admin) → note la clé + le
 | `burn` | POST | Détruire un message et son média (document ouvert). |
 | `upload` / `media` | POST / GET | Déposer / récupérer un blob chiffré. |
 | `close` | POST | PANIQUE : tout effacer pour les deux. |
+| `health` | GET | Diagnostic de déploiement (PHP, base, schéma, dossier uploads). |
 
 ---
 

@@ -41,6 +41,7 @@ try {
         // -------------------------------------------------------------
         case 'create': {
             rate_limit('create', RL_MAX_CREATE);
+            ensure_schema();
             $in = body_json();
             [$cid, $tok] = ids_from($in);
             $pw = $in['admin_password'] ?? '';
@@ -75,6 +76,7 @@ try {
         // -------------------------------------------------------------
         case 'join': {
             rate_limit('join', RL_MAX_JOIN);
+            ensure_schema();
             [$cid, $tok] = ids_from(body_json());
             $pdo = db();
             $pdo->beginTransaction();
@@ -342,10 +344,31 @@ try {
             json_out(200, ['ok' => true, 'closed_seq' => (int)$st->fetch()['closed_seq']]);
         }
 
+        // -------------------------------------------------------------
+        //  HEALTH — diagnostic rapide : PHP, base, schéma, dossier uploads.
+        //  Ne révèle rien de sensible ; pratique pour vérifier un déploiement.
+        // -------------------------------------------------------------
+        case 'health': {
+            $out = ['ok' => true, 'php' => PHP_VERSION, 'db' => false, 'schema' => false,
+                    'uploads_writable' => false, 'admin_password_set' => ADMIN_PASSWORD !== '' && ADMIN_PASSWORD !== 'change-moi-vraiment'];
+            try {
+                db()->query('SELECT 1');
+                $out['db'] = true;
+                $out['schema_added'] = ensure_schema();
+                $out['schema'] = true;
+            } catch (Throwable $e) { $out['ok'] = false; $out['db_error'] = $e->getMessage(); }
+            if (!is_dir(UPLOAD_DIR)) @mkdir(UPLOAD_DIR, 0700, true);
+            $out['uploads_writable'] = is_dir(UPLOAD_DIR) && is_writable(UPLOAD_DIR);
+            if (!$out['uploads_writable'] || !$out['schema']) $out['ok'] = false;
+            json_out($out['ok'] ? 200 : 500, $out);
+        }
+
         default:
             json_out(404, ['error' => 'unknown_action']);
     }
 } catch (Throwable $e) {
-    if (DEBUG) json_out(500, ['error' => 'server', 'detail' => $e->getMessage()]);
-    json_out(500, ['error' => 'server']);
+    // Le message d'erreur SQL/PHP aide à diagnostiquer un déploiement ; il ne
+    // contient jamais de contenu (tout est chiffré côté client).
+    $detail = DEBUG ? $e->getMessage() : preg_replace('/\s+/', ' ', substr($e->getMessage(), 0, 160));
+    json_out(500, ['error' => 'server', 'detail' => $detail]);
 }

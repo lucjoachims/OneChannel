@@ -135,3 +135,27 @@ function purge_expired(?string $cid = null): void {
     }
     $pdo->prepare("DELETE FROM messages WHERE $where")->execute($args);
 }
+
+/**
+ * Vérifie que la base a bien les colonnes de la v2 ; sinon les ajoute.
+ * Appelé à chaque create/join (une requête légère), ce qui évite d'avoir
+ * à jouer migrate-v2.sql à la main. Chaque ALTER est indépendant.
+ */
+function ensure_schema(): array {
+    $pdo = db();
+    $added = [];
+    $cols = [
+        'seen_at'           => 'DATETIME NULL',
+        'typing_at'         => 'DATETIME NULL',
+        'last_delivered_id' => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
+        'last_read_id'      => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
+    ];
+    foreach ($cols as $c => $def) {
+        try { $pdo->query("SELECT $c FROM participants LIMIT 1"); }
+        catch (Throwable $e) {
+            $pdo->exec("ALTER TABLE participants ADD COLUMN $c $def");
+            $added[] = $c;
+        }
+    }
+    return $added;
+}

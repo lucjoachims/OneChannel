@@ -19,12 +19,21 @@ const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2
 const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
+// Affiche une erreur API lisible (une seule fois par panne, pas à chaque poll).
+function reportApiError(what, res) {
+  if (S && S.errorShown) return;
+  if (S) S.errorShown = true;
+  const code = res.status === 0 ? 'réseau' : `HTTP ${res.status}`;
+  const detail = res.data && (res.data.detail || res.data.error) ? ` · ${res.data.detail || res.data.error}` : '';
+  toast(`Erreur ${what} (${code})${detail}`, true, 8000);
+}
+
 let toastTimer = null;
-function toast(msg, danger = false) {
+function toast(msg, danger = false, ms = 2600) {
   const t = $('#toast');
   t.textContent = msg; t.className = 'toast' + (danger ? ' danger' : ''); t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
 // Normalisation de la clé : insensible casse/accents/espaces multiples.
@@ -266,9 +275,11 @@ async function pull() {
   try {
     const res = await apiGet('messages', { channel_id: S.channelId, device_token: S.token, after: S.afterId });
     if (!S || res.status !== 200 || !res.data.ok) {
-      if (S && res.status === 403) { toast('Accès au canal refusé.', true); showStart(); }
+      if (S && res.status === 403) { toast('Accès au canal refusé.', true); showStart(); return; }
+      if (S) reportApiError('lecture', res);
       return;
     }
+    S.errorShown = false;
     const d = res.data;
 
     // Détection d'une PANIQUE distante : on vide la vue.
@@ -507,7 +518,7 @@ async function sendText() {
     channel_id: S.channelId, device_token: S.token, type: 'text', iv, ciphertext,
   });
   if (res.status === 200) pull();
-  else { input.value = txt; toast('Envoi impossible.', true); }
+  else { input.value = txt; reportApiError('envoi', res); }
 }
 $('#msg-send').addEventListener('click', sendText);
 $('#msg-input').addEventListener('keydown', (e) => {
