@@ -1,0 +1,8 @@
+# Configuration locale (contient le mot de passe admin et les accès DB)
+api/config.php
+# Blobs chiffrés déposés par les utilisateurs
+uploads/*
+!uploads/.htaccess
+# Divers
+.DS_Store
+*.log
